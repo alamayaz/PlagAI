@@ -17,7 +17,7 @@ This system provides multi-layered plagiarism detection through:
 The system uses **1 primary LangGraph agent** (`PlagiarismDetectionAgent`) that manages the entire workflow through state transitions and conditional routing. This single-agent architecture ensures consistent state management and simplified error handling across the entire pipeline.
 
 ### Workflow DAG (Directed Acyclic Graph)
-![Plagiarism Detection Workflow](PlagGraphDAG).png)
+![Plagiarism Detection Workflow](PlagGraphDAG.png)
 
 *Place the workflow diagram image as `workflow_dag.png` in your repository root directory*
 
