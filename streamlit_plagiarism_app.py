@@ -23,6 +23,15 @@ except ImportError:
     st.error("Please ensure plagiarism_detector.py is in the same directory")
     st.stop()
 
+# Check for LangGraph availability
+try:
+    import langgraph
+    from langgraph_plagiarism_agent import PlagiarismDetectionAgent
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
+    PlagiarismDetectionAgent = None
+
 # Page configuration
 st.set_page_config(
     page_title="AI Plagiarism Detective",
@@ -101,15 +110,18 @@ def initialize_session_state():
         st.session_state.detector_type = "Standard"
 
 def create_detector(api_keys, detector_type="Standard"):
-    """Create plagiarism detector instance"""
+    """Create plagiarism detection agent instance"""
     try:
-        if detector_type == "Enhanced":
-            return EnhancedPlagiarismDetector(
+        if LANGGRAPH_AVAILABLE:
+            # Use LangGraph agent for structured workflow
+            agent = PlagiarismDetectionAgent(
                 openai_api_key=api_keys['openai'],
                 google_api_key=api_keys.get('google'),
                 google_cse_id=api_keys.get('google_cse')
             )
+            return agent
         else:
+            # Fallback to basic detector
             return PlagiarismDetector(
                 openai_api_key=api_keys['openai'],
                 google_api_key=api_keys.get('google'),
@@ -364,27 +376,107 @@ def display_suggestions(results):
     st.header("💡 AI-Powered Suggestions")
     
     suggestions = results.get('suggestions', [])
+    plagiarism_percentage = results.get('overall_plagiarism_percentage', 0)
+    flagged_chunks = len([chunk for chunk in results.get('detected_plagiarism', []) if chunk.get('is_plagiarized')])
+    
+    # Show status information
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Plagiarism Score", f"{plagiarism_percentage:.1f}%")
+    with col2:
+        st.metric("Flagged Chunks", flagged_chunks)
+    with col3:
+        threshold = 20  # Current threshold for suggestions
+        st.metric("Suggestion Threshold", f"{threshold}%")
     
     if not suggestions or (len(suggestions) == 1 and "Unable to generate" in suggestions[0]):
-        st.info("No suggestions available. The text appears to be original or the AI couldn't generate improvements.")
+        if plagiarism_percentage < 20:
+            st.success("🎉 **Great news!** Your text appears to be original!")
+            st.info("💡 **Why no suggestions?** Your plagiarism score is below 20%, indicating original content. Suggestions are only generated for higher plagiarism scores.")
+            
+            # Option to force suggestions for improvement
+            if st.button("🔧 Generate Writing Improvement Suggestions Anyway"):
+                with st.spinner("Generating writing improvement suggestions..."):
+                    try:
+                        # Force generate suggestions for writing improvement
+                        detector = st.session_state.get('detector')
+                        if detector:
+                            # Create fake plagiarized parts from the original text for improvement suggestions
+                            chunks = [chunk['text'] for chunk in results.get('detected_plagiarism', [])][:3]
+                            if chunks:
+                                improvement_suggestions = detector.generate_suggestions(
+                                    "Original text", chunks
+                                )
+                                if improvement_suggestions:
+                                    st.markdown("### ✍️ Writing Improvement Suggestions")
+                                    for i, suggestion in enumerate(improvement_suggestions):
+                                        with st.expander(f"Improvement suggestion {i+1}"):
+                                            st.markdown(suggestion)
+                    except Exception as e:
+                        st.error(f"Error generating improvement suggestions: {e}")
+        else:
+            st.warning("⚠️ **Suggestions unavailable** despite flagged content.")
+            st.info("This might be due to:")
+            st.markdown("""
+            - 🔑 **OpenAI API issue** - Check your API key and billing
+            - 🌐 **Network connectivity** - Verify internet connection  
+            - 🚫 **Rate limiting** - You may have exceeded API limits
+            - 🔧 **Technical error** - Try running the analysis again
+            """)
+            
+            if st.button("🔄 Retry Generating Suggestions"):
+                st.experimental_rerun()
+        
         return
     
+    # Display actual suggestions
     st.markdown("**🤖 Here are AI-generated suggestions to improve your text and reduce plagiarism:**")
     
+    suggestion_count = len(suggestions)
+    st.info(f"📝 Generated {suggestion_count} suggestion{'s' if suggestion_count != 1 else ''} for flagged content")
+    
     for i, suggestion in enumerate(suggestions):
-        st.markdown(f"### Suggestion {i+1}")
+        st.markdown(f"### 💡 Suggestion {i+1}")
         
-        with st.expander(f"View suggestion {i+1}"):
+        with st.expander(f"View detailed suggestion {i+1}", expanded=True):
             # Parse the suggestion to separate the original text and suggestions
             lines = suggestion.split('\n')
+            original_text = ""
+            rewrite_suggestions = []
+            
             for line in lines:
-                if line.strip():
+                line = line.strip()
+                if line:
                     if line.startswith('For text:'):
-                        st.markdown(f"**Original Text:** {line[10:]}")
-                    elif line.strip().startswith(('1.', '2.', '3.')):
-                        st.markdown(f"**{line.strip()}**")
-                    else:
+                        original_text = line[10:].strip().strip('"\'')
+                        st.markdown(f"**📝 Original Text:**")
+                        st.markdown(f"> {original_text}")
+                        st.markdown("**✍️ Rewrite Options:**")
+                    elif line.startswith(('1.', '2.', '3.')):
+                        st.markdown(f"**{line}**")
+                    elif line and not line.startswith('For text:'):
                         st.markdown(line)
+    
+    # Additional helpful information
+    st.markdown("---")
+    st.markdown("### 📚 How to Use These Suggestions")
+    st.info("""
+    **Tips for implementing suggestions:**
+    - 📖 **Read each option** and choose the one that best fits your writing style
+    - 🎯 **Maintain meaning** while changing structure and vocabulary  
+    - ✅ **Check citations** if the original content should be quoted instead
+    - 🔄 **Run analysis again** after making changes to verify improvement
+    """)
+    
+    # Export suggestions
+    if st.button("📥 Export Suggestions as Text"):
+        suggestions_text = "\n\n".join([f"Suggestion {i+1}:\n{sugg}" for i, sugg in enumerate(suggestions)])
+        st.download_button(
+            label="Download Suggestions",
+            data=suggestions_text,
+            file_name=f"plagiarism_suggestions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            mime="text/plain"
+        )
 
 def display_export_options(results):
     """Display export options for results"""
@@ -408,7 +500,13 @@ def display_export_options(results):
         if st.button("📑 Generate Text Report"):
             try:
                 if hasattr(st.session_state, 'detector') and st.session_state.detector:
-                    report = st.session_state.detector.format_report(results)
+                    if hasattr(st.session_state.detector, 'detector'):
+                        # LangGraph agent - access the underlying detector
+                        report = st.session_state.detector.detector.format_report(results)
+                    else:
+                        # Basic detector
+                        report = st.session_state.detector.format_report(results)
+                    
                     st.download_button(
                         label="Download Text Report",
                         data=report,
@@ -491,7 +589,12 @@ def main():
             for i, analysis in enumerate(st.session_state.analysis_history[-5:]):  # Show last 5
                 timestamp = analysis.get('timestamp', 'Unknown')
                 percentage = analysis.get('percentage', 0)
-                st.write(f"{i+1}. {timestamp}: {percentage:.1f}%")
+                method = analysis.get('method', 'Unknown')
+                st.write(f"{i+1}. {timestamp}: {percentage:.1f}% ({method})")
+    
+    # Show current detection method
+    detection_method = "🤖 LangGraph Agent Workflow" if LANGGRAPH_AVAILABLE else "⚡ Basic Detection"
+    st.sidebar.success(f"Using: {detection_method}")
     
     # Main content area
     tab1, tab2, tab3 = st.tabs(["📝 Text Analysis", "📁 File Analysis", "📊 Batch Analysis"])
@@ -541,21 +644,45 @@ def main():
                         status_text.text("Processing text chunks...")
                         progress_bar.progress(40)
                         
-                        # Run analysis
-                        results = detector.analyze_text(input_text, web_search_enabled=enable_web_search)
+                        # Run analysis using LangGraph agent
+                        if hasattr(detector, 'run_analysis'):
+                            # Using LangGraph agent
+                            results = detector.run_analysis(input_text=input_text)
+                            
+                            # Convert agent results to expected format
+                            if results.get('full_results'):
+                                analysis_results = results['full_results']
+                                analysis_results['overall_plagiarism_percentage'] = results.get('plagiarism_percentage', 0)
+                                analysis_results['suggestions'] = results.get('suggestions', [])
+                            else:
+                                analysis_results = {
+                                    'overall_plagiarism_percentage': results.get('plagiarism_percentage', 0),
+                                    'detected_plagiarism': [],
+                                    'suggestions': results.get('suggestions', []),
+                                    'summary': {
+                                        'plagiarism_percentage': results.get('plagiarism_percentage', 0),
+                                        'total_chunks_analyzed': 0,
+                                        'plagiarized_chunks': results.get('plagiarized_sections_count', 0),
+                                        'web_sources_checked': len(results.get('sources_found', []))
+                                    }
+                                }
+                        else:
+                            # Using basic detector
+                            analysis_results = detector.analyze_text(input_text, web_search_enabled=enable_web_search)
                         progress_bar.progress(80)
                         
                         status_text.text("Generating suggestions...")
                         progress_bar.progress(100)
                         
                         # Store results
-                        st.session_state.analysis_results = results
+                        st.session_state.analysis_results = analysis_results
                         
                         # Add to history
                         st.session_state.analysis_history.append({
                             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M'),
-                            'percentage': results.get('overall_plagiarism_percentage', 0),
-                            'text_preview': input_text[:50] + '...'
+                            'percentage': analysis_results.get('overall_plagiarism_percentage', 0),
+                            'text_preview': input_text[:50] + '...',
+                            'method': 'LangGraph Agent' if hasattr(detector, 'run_analysis') else 'Basic Detector'
                         })
                         
                         progress_bar.empty()
@@ -617,19 +744,43 @@ def main():
                         detector = create_detector(api_keys, detector_type)
                         if detector:
                             with st.spinner("📄 Processing file..."):
-                                # For file analysis, we'll need to extract text first
-                                # This is a simplified version - you might want to use the LangGraph agent
-                                if uploaded_file.type == "text/plain":
-                                    file_text = str(uploaded_file.read(), "utf-8")
+                                # Use LangGraph agent for file processing
+                                if hasattr(detector, 'run_analysis'):
+                                    # LangGraph agent can handle file input directly
+                                    results = detector.run_analysis(input_file=tmp_file_path)
+                                    
+                                    # Convert agent results to expected format
+                                    if results.get('full_results'):
+                                        analysis_results = results['full_results']
+                                        analysis_results['overall_plagiarism_percentage'] = results.get('plagiarism_percentage', 0)
+                                    else:
+                                        analysis_results = {
+                                            'overall_plagiarism_percentage': results.get('plagiarism_percentage', 0),
+                                            'detected_plagiarism': [],
+                                            'suggestions': results.get('suggestions', []),
+                                            'summary': {
+                                                'plagiarism_percentage': results.get('plagiarism_percentage', 0),
+                                                'total_chunks_analyzed': 0,
+                                                'plagiarized_chunks': results.get('plagiarized_sections_count', 0),
+                                                'web_sources_checked': len(results.get('sources_found', []))
+                                            }
+                                        }
+                                    
+                                    st.session_state.analysis_results = analysis_results
+                                    st.success("✅ File analysis completed using LangGraph workflow!")
+                                    st.rerun()
+                                    
                                 else:
-                                    st.error("File text extraction not implemented for this file type in this demo. Please copy and paste the text in the Text Analysis tab.")
-                                    file_text = None
-                                
-                                if file_text:
-                                    results = detector.analyze_text(file_text, web_search_enabled=enable_web_search)
-                                    st.session_state.analysis_results = results
-                                    st.success("✅ File analysis completed!")
-                                    st.experimental_rerun()
+                                    # Fallback to basic file processing
+                                    if uploaded_file.type == "text/plain":
+                                        file_text = str(uploaded_file.read(), "utf-8")
+                                        analysis_results = detector.analyze_text(file_text, web_search_enabled=enable_web_search)
+                                        st.session_state.analysis_results = analysis_results
+                                        st.success("✅ File analysis completed!")
+                                        st.rerun()
+                                    else:
+                                        st.error("File text extraction not implemented for this file type in basic mode. Please use text analysis or upgrade to LangGraph agent.")
+
                     
                     finally:
                         # Clean up temporary file
@@ -675,13 +826,33 @@ def main():
                             }
                             
                             detector = create_detector(api_keys, detector_type)
-                            if detector:
-                                result = detector.analyze_text(text, web_search_enabled=enable_web_search)
-                                batch_results.append({
-                                    'text_preview': text[:50] + '...',
-                                    'plagiarism_percentage': result.get('overall_plagiarism_percentage', 0),
-                                    'flagged_chunks': len([c for c in result.get('detected_plagiarism', []) if c.get('is_plagiarized')])
-                                })
+                            if detector and hasattr(detector, 'run_analysis'):
+                                # Use LangGraph agent for batch processing
+                                batch_inputs = [{"text": text} for text in texts if len(text) > 20]
+                                batch_results = detector.run_batch_analysis(batch_inputs)
+                                
+                                # Convert to display format
+                                display_results = []
+                                for result in batch_results:
+                                    display_results.append({
+                                        'text_preview': result.get('text_preview', 'N/A'),
+                                        'plagiarism_percentage': result.get('plagiarism_percentage', 0),
+                                        'flagged_chunks': result.get('plagiarized_sections_count', 0),
+                                        'method': 'LangGraph Agent'
+                                    })
+                                batch_results = display_results
+                                
+                            elif detector:
+                                # Fallback to basic processing
+                                for i, text in enumerate(texts):
+                                    if len(text) > 20:
+                                        result = detector.analyze_text(text, web_search_enabled=enable_web_search)
+                                        batch_results.append({
+                                            'text_preview': text[:50] + '...',
+                                            'plagiarism_percentage': result.get('overall_plagiarism_percentage', 0),
+                                            'flagged_chunks': len([c for c in result.get('detected_plagiarism', []) if c.get('is_plagiarized')]),
+                                            'method': 'Basic Detector'
+                                        })
                         
                         progress_bar.progress((i + 1) / len(texts))
                     
@@ -712,8 +883,8 @@ def main():
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-        <p>🔍 AI Plagiarism Detective | Powered by OpenAI, Google Search & Advanced ML Algorithms</p>
-        <p>Built with Streamlit | © 2024</p>
+        <p>🔍 AI Plagiarism Detective | Powered by LangGraph Workflow, OpenAI, Google Search & Advanced ML</p>
+        <p>Built with Streamlit & LangGraph | © 2024</p>
     </div>
     """, unsafe_allow_html=True)
 
